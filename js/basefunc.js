@@ -112,52 +112,89 @@ async function processFriendsFile(file) {
     let friendsCount = 0;
     let errors = 0;
 
-    // Определяем заголовки
-    const headers = parseCSVLine(lines[0]).map((h) =>
-      h.toLowerCase().replace(/"/g, "")
+    // Определяем формат файла
+    const firstLine = parseCSVLine(lines[0]);
+    console.log("Первая строка:", firstLine);
+
+    // Проверяем, есть ли заголовки
+    const hasHeaders = firstLine.some(
+      (cell) =>
+        cell.toLowerCase().includes("profile") ||
+        cell.toLowerCase().includes("url") ||
+        cell.toLowerCase().includes("name") ||
+        cell.toLowerCase().includes("link") ||
+        cell.toLowerCase().includes("id")
     );
-    const hasHeaders = headers.some(
-      (h) =>
-        h.includes("profile") ||
-        h.includes("url") ||
-        h.includes("name") ||
-        h.includes("id")
-    );
+
     const startIndex = hasHeaders ? 1 : 0;
 
-    // Определяем индексы столбцов
+    // Определяем структуру на основе первой строки данных
+    const sampleLine = parseCSVLine(lines[startIndex] || lines[0]);
+    console.log("Образец данных:", sampleLine);
+
     let urlIndex = -1;
     let nameIndex = -1;
+    let statusIndex = -1;
 
     if (hasHeaders) {
-      // Ищем столбец с URL
+      // Поиск по заголовкам
+      const headers = firstLine.map((h) => h.toLowerCase().replace(/"/g, ""));
+
       urlIndex = headers.findIndex(
-        (h) => h.includes("profile") || h.includes("url") || h.includes("link")
+        (h) =>
+          h.includes("profile") ||
+          h.includes("url") ||
+          h.includes("link") ||
+          h.includes("id")
       );
-      // Ищем столбец с именем
+
       nameIndex = headers.findIndex(
         (h) => h.includes("name") || h.includes("имя")
       );
 
-      // Если не нашли URL, ищем ID
-      if (urlIndex === -1) {
-        urlIndex = headers.findIndex(
-          (h) => h.includes("id") || h.includes("user")
-        );
-      }
-
-      // Если ничего не нашли, используем первый столбец
-      if (urlIndex === -1) urlIndex = 0;
-      if (nameIndex === -1 && headers.length > 1) nameIndex = 1;
+      statusIndex = headers.findIndex(
+        (h) =>
+          h.includes("status") || h.includes("friend") || h.includes("статус")
+      );
     } else {
-      // Без заголовков: первый столбец - данные, второй - имя
-      urlIndex = 0;
-      nameIndex = headers.length > 1 ? 1 : -1;
+      // Автоопределение структуры
+      for (let i = 0; i < sampleLine.length; i++) {
+        const cell = sampleLine[i].toLowerCase();
+
+        // Если содержит vk.com или выглядит как ID
+        if (
+          cell.includes("vk.com") ||
+          cell.includes("vkontakte") ||
+          /^\d+$/.test(cell.replace(/"/g, ""))
+        ) {
+          urlIndex = i;
+        }
+        // Если содержит имя (буквы кириллицы или латиницы)
+        else if (
+          /[а-яёa-z]/i.test(cell) &&
+          !cell.includes("friend") &&
+          !cell.includes("статус")
+        ) {
+          if (nameIndex === -1) nameIndex = i; // Берем первое найденное имя
+        }
+        // Если содержит статус
+        else if (cell.includes("friend") || cell.includes("статус")) {
+          statusIndex = i;
+        }
+      }
     }
 
+    // Если не нашли URL, берем первый столбец
+    if (urlIndex === -1) urlIndex = 0;
+
     console.log(
-      `📋 Обработка друзей: URL в столбце ${urlIndex}, имена в столбце ${nameIndex}`
+      `📋 Структура файла: URL в столбце ${urlIndex}, имена в столбце ${nameIndex}, статус в столбце ${statusIndex}`
     );
+
+    for (let i = startIndex; i < Math.min(lines.length, startIndex + 5); i++) {
+      const parts = parseCSVLine(lines[i]);
+      console.log(`Строка ${i}:`, parts);
+    }
 
     for (let i = startIndex; i < lines.length; i++) {
       const line = lines[i].trim();
@@ -175,6 +212,14 @@ async function processFriendsFile(file) {
         continue;
       }
 
+      // Показываем прогресс обработки
+      if (i % 50 === 0) {
+        showStatus(
+          "info",
+          `Обработка друзей: строка ${i} из ${lines.length}...`
+        );
+      }
+
       // Извлекаем ID из URL или прямого ID
       const userId = await extractUserIdFromProfile(userData);
 
@@ -184,7 +229,7 @@ async function processFriendsFile(file) {
         // Извлекаем имя если есть
         if (nameIndex !== -1 && parts[nameIndex]) {
           const name = parts[nameIndex].replace(/"/g, "").trim();
-          if (name) {
+          if (name && name !== "friend" && name !== "статус") {
             friendsData[userId] = name;
           }
         }
@@ -197,9 +242,11 @@ async function processFriendsFile(file) {
         }
       } else {
         errors++;
-        if (errors <= 5) {
+        if (errors <= 10) {
           console.warn(
-            `Не удалось извлечь ID из строки ${i + 1}: "${userData}"`
+            `Не удалось извлечь ID из строки ${
+              i + 1
+            }: "${userData}" (части: ${JSON.stringify(parts)})`
           );
         }
       }
@@ -553,41 +600,64 @@ async function extractUserIdFromProfile(userData) {
 
   userData = userData.trim().replace(/['"]/g, "");
 
+  // Прямой числовой ID
   if (/^\d+$/.test(userData)) {
     return userData;
   }
 
   let username = null;
 
+  // Расширенные паттерны для извлечения username
   const patterns = [
-    /(?:https?:\/\/)(?:www\.|m\.)?vk\.com\/([^\/\?&#]+)/i,
-    /(?:https?:\/\/)(?:www\.|m\.)?vkontakte\.ru\/([^\/\?&#]+)/i,
-    /(?:www\.|m\.)?vk\.com\/([^\/\?&#]+)/i,
-    /vk\.com\/([^\/\?&#]+)/i,
+    // Полные URL с различными доменами
+    /(?:https?:\/\/)?(?:www\.|m\.)?vk\.com\/([^\/\?&#,]+)/i,
+    /(?:https?:\/\/)?(?:www\.|m\.)?vkontakte\.ru\/([^\/\?&#,]+)/i,
+
+    // Короткие формы
+    /(?:www\.|m\.)?vk\.com\/([^\/\?&#,]+)/i,
+    /vk\.com\/([^\/\?&#,]+)/i,
+
+    // ID формат
     /^id(\d+)$/i,
+
+    // Простой username без домена
     /^([a-zA-Z0-9_.-]+)$/,
   ];
 
   for (let pattern of patterns) {
     const match = userData.match(pattern);
     if (match && match[1]) {
-      username = match[1].toLowerCase();
+      username = match[1].toLowerCase().trim();
       break;
     }
   }
 
-  if (!username) return null;
+  if (!username) {
+    console.warn(`Не удалось извлечь username из: "${userData}"`);
+    return null;
+  }
 
+  // Обработка id формата
   if (username.startsWith("id")) {
     const idMatch = username.match(/^id(\d+)$/);
     if (idMatch && idMatch[1]) return idMatch[1];
   }
 
+  // Прямой числовой ID
   if (/^\d+$/.test(username)) return username;
 
-  if (username.length < 3 || username.length > 32) return null;
-  if (!/^[a-zA-Z0-9_.-]+$/.test(username)) return null;
+  // Валидация username
+  if (username.length < 3 || username.length > 32) {
+    console.warn(`Username "${username}" имеет неверную длину`);
+    return null;
+  }
 
+  if (!/^[a-zA-Z0-9_.-]+$/.test(username)) {
+    console.warn(`Username "${username}" содержит недопустимые символы`);
+    return null;
+  }
+
+  // Список зарезервированных username'ов
   const reservedUsernames = [
     "id",
     "admin",
@@ -630,9 +700,13 @@ async function extractUserIdFromProfile(userData) {
     "bug",
     "report",
     "security",
+    "account",
   ];
 
-  if (reservedUsernames.includes(username)) return null;
+  if (reservedUsernames.includes(username)) {
+    console.warn(`Username "${username}" зарезервирован`);
+    return null;
+  }
 
   try {
     const attemptNumber = processingStats.resolveAttempts || 0;
@@ -685,6 +759,14 @@ function resolveUsernameWithJSONP(username) {
         } else if (response.response.type === "group") {
           console.warn(`Username "${username}" принадлежит группе, пропускаем`);
           resolve(null);
+        } else if (
+          response.response.type === "application" ||
+          response.response.type === "vk_app"
+        ) {
+          console.warn(
+            `Username "${username}" принадлежит приложению VK, пропускаем`
+          );
+          resolve(null);
         } else {
           console.warn(
             `Username "${username}" имеет неизвестный тип: ${response.response.type}`
@@ -692,7 +774,7 @@ function resolveUsernameWithJSONP(username) {
           resolve(null);
         }
       } else {
-        console.info(`Username "${username}" не занят/не найден`);
+        console.info(`Username "${username}" не найден`);
         resolve(null);
       }
     };
@@ -726,24 +808,63 @@ function resolveUsernameWithJSONP(username) {
   });
 }
 
+// ДОПОЛНИТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ АНАЛИЗА СТРУКТУРЫ CSV
+function analyzeCSVStructure(lines, maxLinesToAnalyze = 10) {
+  console.log("🔍 Анализ структуры CSV файла:");
+
+  for (let i = 0; i < Math.min(lines.length, maxLinesToAnalyze); i++) {
+    const parts = parseCSVLine(lines[i]);
+    console.log(
+      `Строка ${i}:`,
+      parts.map((part, idx) => `[${idx}] "${part}"`)
+    );
+  }
+
+  // Попытка определить количество столбцов
+  const columnCounts = lines
+    .slice(0, 10)
+    .map((line) => parseCSVLine(line).length);
+  const mostCommonCount = columnCounts
+    .sort(
+      (a, b) =>
+        columnCounts.filter((v) => v === a).length -
+        columnCounts.filter((v) => v === b).length
+    )
+    .pop();
+
+  console.log(`📊 Наиболее частое количество столбцов: ${mostCommonCount}`);
+
+  return mostCommonCount;
+}
+
 // Вспомогательные функции
 function parseCSVLine(line) {
   const result = [];
   let current = "";
   let inQuotes = false;
+  let i = 0;
 
-  for (let i = 0; i < line.length; i++) {
+  while (i < line.length) {
     const char = line[i];
 
     if (char === '"') {
-      inQuotes = !inQuotes;
+      if (inQuotes && line[i + 1] === '"') {
+        // Обработка двойных кавычек внутри поля
+        current += '"';
+        i += 2;
+        continue;
+      } else {
+        inQuotes = !inQuotes;
+      }
     } else if (char === "," && !inQuotes) {
       result.push(current.trim());
       current = "";
     } else {
       current += char;
     }
+    i++;
   }
+
   result.push(current.trim());
   return result;
 }
